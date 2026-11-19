@@ -1,5 +1,6 @@
 import {
   type DeviceHostSummary,
+  DeviceOperationError,
   DevicePlatformAvailability,
   DeviceToolVersions,
   deviceToolInstallMessage,
@@ -15,6 +16,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
+import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -94,6 +96,32 @@ const targetFor = (config: SshDeviceHostConfig) => ({
 });
 const identityArgs = (config: SshDeviceHostConfig) =>
   config.identityFile ? ["-i", config.identityFile] : [];
+// The server holds the only write end of stdin, so if it exits the remote `cat` sees EOF and ssh
+// exits once its forwarded connections close, instead of being orphaned.
+const forwardArgs = (config: SshDeviceHostConfig, forwards: ReadonlyArray<string>) => [
+  ...baseSshArgs(targetFor(config), { batchMode: "yes" }),
+  ...identityArgs(config),
+  "-o",
+  "ExitOnForwardFailure=yes",
+  // Multiplexed clients exit after handing forwards to the master; own this connection.
+  "-o",
+  "ControlMaster=no",
+  "-o",
+  "ControlPath=none",
+  "-o",
+  "ControlPersist=no",
+  "-o",
+  "ServerAliveInterval=10",
+  "-o",
+  "ServerAliveCountMax=3",
+  "-T",
+  ...forwards.flatMap((forward) => ["-L", forward]),
+  config.target,
+  "sh",
+  "-c",
+  quoteRemoteArg("exec cat >/dev/null"),
+];
+
 const commandArgs = (script: string) => [
   "sh",
   "-c",
@@ -385,36 +413,12 @@ export const make = Effect.fn("SshDeviceHost.make")(function* (
       .spawn(
         ChildProcess.make(
           ssh,
-          [
-            ...baseSshArgs(targetFor(config), { batchMode: "yes" }),
-            ...identityArgs(config),
-            "-o",
-            "ExitOnForwardFailure=yes",
-            // Multiplexed clients exit after handing forwards to the master; own this connection.
-            "-o",
-            "ControlMaster=no",
-            "-o",
-            "ControlPath=none",
-            "-o",
-            "ControlPersist=no",
-            "-o",
-            "ServerAliveInterval=10",
-            "-o",
-            "ServerAliveCountMax=3",
-            "-T",
-            "-L",
+          forwardArgs(config, [
             `127.0.0.1:${hubPort}:127.0.0.1:${remote.hubPort}`,
             ...(remote.daemonPort === undefined
               ? []
-              : ["-L", `127.0.0.1:${daemonPort}:127.0.0.1:${remote.daemonPort}`]),
-            config.target,
-            // The server holds the only write end of this stdin, so when it exits for any
-            // reason the remote `cat` sees EOF and ssh exits once its forwarded connections
-            // close, instead of being orphaned.
-            "sh",
-            "-c",
-            quoteRemoteArg("exec cat >/dev/null"),
-          ],
+              : [`127.0.0.1:${daemonPort}:127.0.0.1:${remote.daemonPort}`]),
+          ]),
           { stdin: "pipe", stdout: "ignore", stderr: "pipe" },
         ),
       )
@@ -435,6 +439,48 @@ export const make = Effect.fn("SshDeviceHost.make")(function* (
       ),
       Effect.forkIn(scope),
     );
+    const forwards = new Map<number, number>();
+    const forwardLock = yield* Semaphore.make(1);
+    const forwardPort = (remotePort: number) =>
+      forwardLock
+        .withPermit(
+          Effect.gen(function* () {
+            const known = forwards.get(remotePort);
+            if (known !== undefined) return known;
+            const localPort = yield* net.reserveLoopbackPort("127.0.0.1");
+            const forward = yield* spawner
+              .spawn(
+                ChildProcess.make(
+                  ssh,
+                  forwardArgs(config, [`127.0.0.1:${localPort}:127.0.0.1:${remotePort}`]),
+                  { stdin: "pipe", stdout: "ignore", stderr: "ignore" },
+                ),
+              )
+              .pipe(Effect.provideService(Scope.Scope, scope));
+            yield* forward.exitCode.pipe(
+              Effect.ignore,
+              Effect.andThen(Effect.sync(() => forwards.delete(remotePort))),
+              Effect.forkIn(scope),
+            );
+            const listening = net.hasListenerOnHost(localPort, "127.0.0.1").pipe(
+              Effect.flatMap((up) => (up ? Effect.void : Effect.fail("not yet"))),
+              Effect.retry({ times: 40, schedule: Schedule.spaced("250 millis") }),
+            );
+            yield* listening;
+            forwards.set(remotePort, localPort);
+            return localPort;
+          }),
+        )
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new DeviceOperationError({
+                operation: "forward port",
+                reason: "command_failed",
+                cause,
+              }),
+          ),
+        );
     const hubOrigin = `http://127.0.0.1:${hubPort}`;
     const next = {
       nodePath: remote.nodePath,
@@ -467,6 +513,7 @@ export const make = Effect.fn("SshDeviceHost.make")(function* (
         : {}),
       helpers: remote.helpers,
       run,
+      forwardPort,
     };
     for (const [baseUrl, route] of [
       [next.hub.origin, "/readyz"],

@@ -11,19 +11,30 @@ import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/http";
 
 import type { DeviceHostReady } from "./DeviceHost.ts";
+import { webKitFrontendPath } from "./DeviceInspectWebKit.ts";
 
 type Runner = DeviceHostReady["run"];
+type ForwardPort = NonNullable<DeviceHostReady["forwardPort"]>;
 
-// Chrome, WebView and other Chromium browsers each expose an abstract socket named this way.
+interface InspectDevice {
+  readonly id: string;
+  readonly platform: DevicePlatform;
+  readonly version: string;
+  readonly physical: boolean;
+}
+
+interface InspectListing {
+  readonly unsupported: string | null;
+  readonly targets: ReadonlyArray<DeviceInspectTarget>;
+}
+
+// Each Chromium browser and debuggable web view exposes one of these abstract sockets.
 const DEVTOOLS_SOCKET = /@([\w.]*devtools_remote(?:_\d+)?)\s*$/;
-const FALLBACK_FRONTEND = "https://chrome-devtools-frontend.appspot.com/serve_rev/@";
+const FALLBACK_FRONTEND_REVISION = "/inspect-frontend/serve_rev/@";
 const RELAY_LIFETIME = Duration.hours(1);
 
-/**
- * Chrome refuses debugger connections that carry a web Origin, and every browser sends one, so the
- * hub relays them. A token is handed out only by the authenticated target listing and names one
- * page, which keeps the relay from reaching any other loopback socket.
- */
+// Only the authenticated listing mints tokens, and each names one page, so the relay can't be
+// pointed at any other loopback socket.
 const relays = new Map<string, { readonly url: string; readonly expiresAt: number }>();
 
 const mintRelay = Effect.fn("DeviceInspect.mintRelay")(function* (
@@ -37,7 +48,6 @@ const mintRelay = Effect.fn("DeviceInspect.mintRelay")(function* (
   return token;
 });
 
-/** The page debugger a relay token opens, while the token is current. */
 export const resolveInspectRelay = Effect.fn("DeviceInspect.resolveRelay")(function* (
   token: string,
 ) {
@@ -119,24 +129,21 @@ const ownerName = (socket: string, version: typeof CdpVersion.Type) => {
   return version.Browser?.split("/")[0] ?? pkg ?? socket;
 };
 
-/** The frontend matching the device browser's version; the client adds where to connect. */
-const frontendUrl = (page: typeof CdpPage.Type, version: typeof CdpVersion.Type) => {
-  if (page.devtoolsFrontendUrl?.startsWith("http")) {
-    const url = new URL(page.devtoolsFrontendUrl);
-    url.search = "";
-    return url.toString();
-  }
+const chromeFrontendPath = (page: typeof CdpPage.Type, version: typeof CdpVersion.Type) => {
+  if (page.devtoolsFrontendUrl?.startsWith("http"))
+    return `/inspect-frontend${new URL(page.devtoolsFrontendUrl).pathname}`;
   const revision = version["WebKit-Version"]?.match(/@([0-9a-f]{40})/)?.[1] ?? "";
-  return `${FALLBACK_FRONTEND}${revision}/inspector.html`;
+  return `${FALLBACK_FRONTEND_REVISION}${revision}/inspector.html`;
 };
 
 const listAndroid = Effect.fn("DeviceInspect.listAndroid")(function* (
   http: HttpClient.HttpClient,
   random: SecureRandom.SecureRandom["Service"],
-  run: Runner,
+  ready: DeviceHostReady,
+  forwardPort: ForwardPort,
   serial: string,
 ) {
-  const sockets = yield* run("adb", ["-s", serial, "shell", "cat", "/proc/net/unix"]).pipe(
+  const sockets = yield* ready.run("adb", ["-s", serial, "shell", "cat", "/proc/net/unix"]).pipe(
     Effect.flatMap(commandFailed("inspect sockets")),
     Effect.map((table) => [
       ...new Set(
@@ -151,7 +158,9 @@ const listAndroid = Effect.fn("DeviceInspect.listAndroid")(function* (
     sockets,
     (socket) =>
       Effect.gen(function* () {
-        const port = yield* forwardSocket(run, serial, socket);
+        const port = yield* forwardSocket(ready.run, serial, socket).pipe(
+          Effect.flatMap(forwardPort),
+        );
         const base = `http://127.0.0.1:${port}`;
         const version = yield* getText(http, "inspect version", `${base}/json/version`).pipe(
           Effect.flatMap(decodeVersion),
@@ -169,7 +178,7 @@ const listAndroid = Effect.fn("DeviceInspect.listAndroid")(function* (
                 title: page.title || page.url,
                 url: page.url,
                 owner: ownerName(socket, version),
-                frontendUrl: frontendUrl(page, version),
+                frontendPath: chromeFrontendPath(page, version),
                 relayToken,
               })),
             ),
@@ -183,26 +192,137 @@ const listAndroid = Effect.fn("DeviceInspect.listAndroid")(function* (
   return perSocket.flat();
 });
 
+// Starts or reuses ios_webkit_debug_proxy for one device; prints `ok <port>` or `error <reason>`.
+// Not yet run on a Mac.
+const IOS_PROXY_SCRIPT = [
+  "set -u",
+  'udid="$1"; physical="$2"; node="$3"',
+  'command -v ios_webkit_debug_proxy >/dev/null 2>&1 || { echo "error missing-proxy"; exit 0; }',
+  'if [ "$physical" = 1 ]; then',
+  '  source="usbmux"',
+  "else",
+  '  pid=$(pgrep -f "launchd_sim .*/Devices/$udid/" | head -n 1)',
+  '  [ -n "$pid" ] || { echo "error not-booted"; exit 0; }',
+  "  socket=$(lsof -a -p \"$pid\" -U -F n 2>/dev/null | sed -n 's/^n//p' | grep 'com[.]apple[.]webinspectord_sim[.]socket$' | head -n 1)",
+  '  [ -n "$socket" ] || { echo "error no-inspector"; exit 0; }',
+  '  source="unix:$socket"',
+  "fi",
+  'state="$HOME/.t3/device/inspect/$udid"',
+  'mkdir -p "$state"',
+  'if [ -f "$state/pid" ] && kill -0 "$(cat "$state/pid")" 2>/dev/null && [ "$(cat "$state/source" 2>/dev/null)" = "$source" ]; then',
+  '  echo "ok $(cat "$state/port")"; exit 0',
+  "fi",
+  '[ -f "$state/pid" ] && kill "$(cat "$state/pid")" 2>/dev/null',
+  // Two free loopback ports: the proxy's device list, then this device's page list.
+  'ports=$("$node" -e \'const net=require("net");const ports=[];const take=()=>{const s=net.createServer().listen(0,"127.0.0.1",()=>{ports.push(s.address().port);s.close(()=>ports.length<2?take():console.log(ports.join(" ")))})};take()\')',
+  'list="${ports% *}"; port="${ports#* }"',
+  'if [ "$physical" = 1 ]; then',
+  '  set -- -c "null:$list,$udid:$port"',
+  "else",
+  '  set -- -s "$source" -c "null:$list,:$port-$port"',
+  "fi",
+  'nohup ios_webkit_debug_proxy "$@" -F >"$state/log" 2>&1 </dev/null &',
+  'echo $! >"$state/pid"; echo "$source" >"$state/source"; echo "$port" >"$state/port"',
+  "i=0",
+  'while [ "$i" -lt 40 ]; do',
+  '  curl -fsS "http://127.0.0.1:$port/json" >/dev/null 2>&1 && { echo "ok $port"; exit 0; }',
+  "  i=$((i + 1)); sleep 0.25",
+  "done",
+  "echo \"error proxy-start $(tail -n 3 \"$state/log\" 2>/dev/null | tr '\\n' ' ')\"",
+].join("\n");
+
+const IOS_PROXY_ERRORS: Readonly<Record<string, string>> = {
+  "missing-proxy":
+    "Web inspection for iOS needs ios_webkit_debug_proxy on the Mac. Install it there with `brew install ios-webkit-debug-proxy`.",
+  "not-booted": "Boot the simulator to inspect its web content.",
+  "no-inspector":
+    "The simulator's Web Inspector isn't running yet. Open Safari or the app, then refresh.",
+};
+
+const IwdpPage = Schema.Struct({
+  title: Schema.String,
+  url: Schema.String,
+  webSocketDebuggerUrl: Schema.String,
+  appId: Schema.optional(Schema.String),
+});
+const decodeIwdpPages = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(IwdpPage)));
+
+const listIos = Effect.fn("DeviceInspect.listIos")(function* (
+  http: HttpClient.HttpClient,
+  random: SecureRandom.SecureRandom["Service"],
+  ready: DeviceHostReady,
+  forwardPort: ForwardPort,
+  device: InspectDevice,
+): Effect.fn.Return<InspectListing, DeviceOperationError> {
+  const started = yield* ready
+    .run(
+      "sh",
+      [
+        "-c",
+        IOS_PROXY_SCRIPT,
+        "t3-inspect",
+        device.id,
+        device.physical ? "1" : "0",
+        ready.nodePath,
+      ],
+      { timeoutMs: 30_000 },
+    )
+    .pipe(Effect.flatMap(commandFailed("inspect proxy")));
+  const [status, ...detail] = started.trim().split(" ");
+  if (status !== "ok") {
+    const reason = detail[0] ?? "";
+    return {
+      unsupported:
+        IOS_PROXY_ERRORS[reason] ??
+        `ios_webkit_debug_proxy didn't start on the Mac: ${detail.join(" ") || "no output"}`,
+      targets: [],
+    };
+  }
+  const port = yield* forwardPort(Number(detail[0]));
+  const pages = yield* getText(http, "inspect pages", `http://127.0.0.1:${port}/json`).pipe(
+    Effect.flatMap(decodeIwdpPages),
+    Effect.mapError(
+      (cause) =>
+        new DeviceOperationError({ operation: "inspect pages", reason: "invalid_payload", cause }),
+    ),
+  );
+  const frontendPath = webKitFrontendPath(device.version);
+  const targets = yield* Effect.forEach(
+    pages.flatMap((page) => {
+      const number = page.webSocketDebuggerUrl.match(/\/devtools\/page\/(\d+)$/)?.[1];
+      return number === undefined ? [] : [{ page, number }];
+    }),
+    ({ page, number }) =>
+      mintRelay(random, `ws://127.0.0.1:${port}/devtools/page/${number}`).pipe(
+        Effect.map((relayToken): DeviceInspectTarget => ({
+          id: `${page.appId ?? "page"}/${number}`,
+          title: page.title || page.url,
+          url: page.url,
+          // The proxy names apps only by process, so Safari and web views look alike here.
+          owner: page.appId ? `WebKit · ${page.appId}` : "WebKit",
+          frontendPath,
+          relayToken,
+        })),
+      ),
+  );
+  return { unsupported: null, targets };
+});
+
 export const listInspectTargets = Effect.fn("DeviceInspect.list")(function* (input: {
   readonly http: HttpClient.HttpClient | null;
   readonly random: SecureRandom.SecureRandom["Service"] | null;
   readonly ready: DeviceHostReady;
-  readonly platform: DevicePlatform;
-  readonly deviceId: string;
-  readonly isLocalHost: boolean;
-}): Effect.fn.Return<
-  { readonly unsupported: string | null; readonly targets: ReadonlyArray<DeviceInspectTarget> },
-  DeviceOperationError
-> {
-  // Forwarded ports open on the host, which the client reaches only when they share a machine.
-  if (!input.isLocalHost)
-    return { unsupported: "Web inspection works only for devices on this machine.", targets: [] };
-  if (input.platform !== "android")
-    return { unsupported: "Web inspection is available for Android devices.", targets: [] };
-  if (input.http === null || input.random === null)
+  readonly device: InspectDevice;
+}): Effect.fn.Return<InspectListing, DeviceOperationError> {
+  const { http, random, ready, device } = input;
+  if (http === null || random === null)
     return { unsupported: "Web inspection is unavailable in this server.", targets: [] };
+  if (ready.forwardPort === undefined)
+    return { unsupported: "This device host can't forward ports for web inspection.", targets: [] };
+  if (device.platform === "ios")
+    return yield* listIos(http, random, ready, ready.forwardPort, device);
   return {
     unsupported: null,
-    targets: yield* listAndroid(input.http, input.random, input.ready.run, input.deviceId),
+    targets: yield* listAndroid(http, random, ready, ready.forwardPort, device.id),
   };
 });

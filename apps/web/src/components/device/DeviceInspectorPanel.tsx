@@ -11,18 +11,14 @@ import { deviceEnvironment } from "~/state/device";
 import { formatEnvironmentQueryError } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 
-/**
- * Loads the frontend and its debugger connection through the hub, since browsers keep a public
- * page from opening loopback sockets. DevTools takes the connection as `ws` or `wss`.
- */
+// Through the hub, since browsers keep a public page from opening loopback sockets.
 const inspectorUrl = (target: DeviceInspectTarget, access: DeviceHubAccess) => {
   const socket = new URL(`${access.wsBase}/inspect/${target.relayToken}`);
-  const url = new URL(`${access.httpBase}/inspect-frontend${new URL(target.frontendUrl).pathname}`);
+  const url = new URL(`${access.httpBase}${target.frontendPath}`);
   url.searchParams.set(socket.protocol === "wss:" ? "wss" : "ws", socket.host + socket.pathname);
   return url.toString();
 };
 
-/** DevTools for a web page running on the device, beside the device rather than inside its page. */
 export function DeviceInspectorPanel(props: {
   readonly environmentId: EnvironmentId;
   readonly device: DeviceSummary;
@@ -111,7 +107,7 @@ export function DeviceInspectorPanel(props: {
           title={gt("DevTools for {title}", { title: selected.title })}
           src={inspectorUrl(selected, props.access)}
           className="min-h-0 w-full flex-1 border-0 bg-background"
-          // oxlint-disable-next-line react/iframe-missing-sandbox -- the frontend is another origin, so same-origin only grants it its own storage
+          // oxlint-disable-next-line react/iframe-missing-sandbox -- DevTools needs script and its own storage
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
           allow="clipboard-read; clipboard-write"
         />

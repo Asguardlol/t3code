@@ -1061,9 +1061,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       http: Option.getOrNull(inspectHttp),
       random: Option.getOrNull(inspectRandom),
       ready,
-      platform: device.platform,
-      deviceId: device.id,
-      isLocalHost: ready.hostId === LOCAL_DEVICE_HOST_ID,
+      device,
     });
     return { hostId: ready.hostId, deviceId: device.id, ...listed };
   });

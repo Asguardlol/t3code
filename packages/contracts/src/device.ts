@@ -525,8 +525,8 @@ export const DeviceInspectTarget = Schema.Struct({
   url: Schema.String,
   /** The browser or app that owns the page, such as Chrome or an app's web view. */
   owner: Schema.String,
-  /** The DevTools frontend page for this browser's version, without its connection parameter. */
-  frontendUrl: Schema.String,
+  /** Hub path of the DevTools frontend for the page's engine and version. */
+  frontendPath: Schema.String,
   /** Opens the page's debugger through the device hub's `/inspect/<token>` relay. */
   relayToken: Schema.String,
 });

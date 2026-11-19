@@ -857,6 +857,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     }),
     nodePath: running.hub.nodePath,
     run,
+    forwardPort: Effect.succeed,
     helpers: running.helpers,
     ...(running.agentDevice
       ? { releaseAgentSession: releaseAgentDeviceSession(httpClient, running.agentDevice) }

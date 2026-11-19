@@ -169,6 +169,8 @@ export interface DeviceHostReady {
       readonly maxOutputBytes?: number;
     },
   ) => Effect.Effect<{ readonly stdout: string; readonly stderr: string; readonly code: number }>;
+  /** Makes a host loopback port reachable from this server; absent where a host can't. */
+  readonly forwardPort?: (remotePort: number) => Effect.Effect<number, DeviceOperationError>;
   readonly helpers: {
     readonly serveSimAxSettings: string | null;
     readonly serveSimCli: string | null;

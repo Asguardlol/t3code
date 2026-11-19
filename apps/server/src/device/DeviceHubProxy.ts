@@ -21,6 +21,7 @@ import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import { authenticateMediaRequest, failEnvironmentInternal } from "../auth/http.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import { resolveInspectRelay } from "./DeviceInspect.ts";
+import { serveWebKitFile } from "./DeviceInspectWebKit.ts";
 import * as DeviceService from "./DeviceService.ts";
 import { repeatStillFrame } from "./mjpegStillFrame.ts";
 
@@ -54,6 +55,7 @@ const INSPECT_RELAY_PATH = /^\/inspect\/([\w-]{32})$/;
 const INSPECT_FRONTEND_PATH =
   /^\/inspect-frontend(\/(?:serve_rev|serve_file|serve_internal_file)\/@[0-9a-f]{40}\/[\w./-]+)$/;
 const INSPECT_FRONTEND_ORIGIN = "https://chrome-devtools-frontend.appspot.com";
+const INSPECT_WEBKIT_PATH = /^\/inspect-webkit\/([\w./-]+)$/;
 
 const ALLOWED_WS_PATHS: ReadonlyArray<RegExp> = [
   /^\/api\/devices\/ws$/,
@@ -205,7 +207,6 @@ const serveInspectFrontend = Effect.fn("DeviceHubProxy.serveInspectFrontend")(fu
   const contentType = response.headers["content-type"];
   return HttpServerResponse.uint8Array(body, {
     status: response.status,
-    // Revision-pinned files never change.
     headers: { "cache-control": "public, max-age=86400, immutable" },
     ...(contentType ? { contentType } : {}),
   });
@@ -229,6 +230,15 @@ const handler = Effect.gen(function* () {
   const frontendFile = hubPath.match(INSPECT_FRONTEND_PATH)?.[1];
   if (frontendFile !== undefined && !upgrade && request.method === "GET") {
     return yield* serveInspectFrontend(frontendFile);
+  }
+  const webKitFile = hubPath.match(INSPECT_WEBKIT_PATH)?.[1];
+  if (webKitFile !== undefined && !upgrade && request.method === "GET") {
+    return yield* serveWebKitFile(webKitFile).pipe(
+      Effect.catchTags({
+        WebKitDownloadError: (error) =>
+          Effect.succeed(HttpServerResponse.text(error.message, { status: 502 })),
+      }),
+    );
   }
   const matches = (paths: ReadonlyArray<RegExp>) => paths.some((pattern) => pattern.test(hubPath));
   const allowed = upgrade

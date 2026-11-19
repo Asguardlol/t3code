@@ -6,6 +6,7 @@ import {
   LOCAL_DEVICE_HOST_ID,
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { HttpClient, HttpClientResponse, HttpRouter } from "effect/http";
@@ -100,6 +101,8 @@ const fixture = (
         }),
       ),
       Layer.provideMerge(Layer.succeed(HttpClient.HttpClient, client)),
+      // The inspector routes serve files.
+      Layer.provideMerge(NodeServices.layer),
       Layer.provideMerge(
         Layer.mock(SessionStore.SessionStore, {
           cookieName: "test",
