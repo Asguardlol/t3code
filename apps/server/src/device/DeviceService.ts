@@ -5,6 +5,8 @@ import {
   type DeviceDetail,
   type DeviceDetailInput,
   type DeviceError,
+  type DeviceInspectTargets,
+  type DeviceInspectTargetsInput,
   DeviceHostId,
   DeviceId,
   DeviceHostUnavailableError,
@@ -60,6 +62,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -72,6 +75,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { isLocalSshDeviceHost, remoteSshDeviceHosts } from "./localSshDeviceHost.ts";
 
 import { readDeviceDetail, runDeviceAction } from "./DeviceActions.ts";
+import { listInspectTargets } from "./DeviceInspect.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as SecretResolverLayer from "../secrets/SecretResolver.ts";
@@ -216,6 +220,9 @@ export class DeviceService extends Context.Service<
     readonly shutdown: (input: DeviceShutdownInput) => Effect.Effect<void, DeviceError>;
     readonly detail: (input: DeviceDetailInput) => Effect.Effect<DeviceDetail, DeviceError>;
     readonly action: (input: DeviceActionInput) => Effect.Effect<DeviceDetail, DeviceError>;
+    readonly inspectTargets: (
+      input: DeviceInspectTargetsInput,
+    ) => Effect.Effect<DeviceInspectTargets, DeviceError>;
     readonly screenshot: (input: {
       readonly hostId?: DeviceHostId | undefined;
       readonly deviceId: DeviceId;
@@ -294,6 +301,9 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
 ) {
   const settings = yield* ServerSettings.ServerSettingsService;
   const digest = yield* Digest.Digest;
+  // Optional so test layers that never inspect need not provide one.
+  const inspectHttp = yield* Effect.serviceOption(HttpClient.HttpClient);
+  const inspectRandom = yield* Effect.serviceOption(SecureRandom.SecureRandom);
   const lifecycleLock = yield* Semaphore.make(1);
   const readDeviceSettings = settings.getSettings.pipe(
     Effect.map((value) => ({
@@ -1043,6 +1053,21 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     },
   );
 
+  const inspectTargets: DeviceService["Service"]["inspectTargets"] = Effect.fn(
+    "DeviceService.inspectTargets",
+  )(function* (input) {
+    const { ready, device } = yield* resolveDevice(input.hostId, input.deviceId);
+    const listed = yield* listInspectTargets({
+      http: Option.getOrNull(inspectHttp),
+      random: Option.getOrNull(inspectRandom),
+      ready,
+      platform: device.platform,
+      deviceId: device.id,
+      isLocalHost: ready.hostId === LOCAL_DEVICE_HOST_ID,
+    });
+    return { hostId: ready.hostId, deviceId: device.id, ...listed };
+  });
+
   const sessionsForThread: DeviceService["Service"]["sessionsForThread"] = (threadId) =>
     SynchronizedRef.get(stateRef).pipe(
       Effect.map(({ state }) => state.sessions.filter((session) => session.threadId === threadId)),
@@ -1236,6 +1261,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       shutdown,
       detail,
       action,
+      inspectTargets,
       screenshot,
       locateDevice,
       locateSession,

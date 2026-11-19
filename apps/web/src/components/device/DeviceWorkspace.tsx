@@ -10,6 +10,7 @@ import {
 } from "@t3tools/client-runtime/device/screenshot";
 import { refreshDeviceHubAccess, useDeviceHubAccess } from "~/state/device";
 import { DeviceControlsRail } from "./DeviceControlsRail";
+import { DeviceInspectorPanel } from "./DeviceInspectorPanel";
 import { DeviceStreamView } from "./DeviceStreamView";
 import { DeviceToolsPanel } from "./DeviceToolsPanel";
 import { useDeviceControls } from "./useDeviceControls";
@@ -31,6 +32,7 @@ export function DeviceWorkspace(props: {
 }) {
   const gt = useGT();
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [inspectOpen, setInspectOpen] = useState(false);
   const [axOverlay, setAxOverlay] = useState(false);
   const [screenshotPending, setScreenshotPending] = useState(false);
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
@@ -108,6 +110,8 @@ export function DeviceWorkspace(props: {
                 onScreenshot={() => void saveScreenshot()}
                 toolsOpen={toolsOpen}
                 onTools={() => setToolsOpen(!toolsOpen)}
+                inspectOpen={inspectOpen}
+                onInspect={() => setInspectOpen(!inspectOpen)}
                 onFloat={props.onFloat}
                 onClose={props.onClose}
                 onPowerOff={props.onPowerOff}
@@ -116,6 +120,16 @@ export function DeviceWorkspace(props: {
           />
         </div>
       </div>
+      {inspectOpen ? (
+        <DeviceInspectorPanel
+          key={`${props.device.hostId}:${props.device.id}`}
+          environmentId={props.environmentId}
+          device={props.device}
+          access={access}
+          onClose={() => setInspectOpen(false)}
+          className="w-1/2 min-w-80 shrink-0 border-l"
+        />
+      ) : null}
       {toolsOpen ? (
         <DeviceToolsPanel
           device={props.device}

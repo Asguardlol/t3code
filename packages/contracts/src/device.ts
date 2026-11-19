@@ -518,6 +518,32 @@ export type DeviceActionType = DeviceActionInput["type"];
 export const DeviceDetailInput = Schema.Struct(DeviceTarget);
 export type DeviceDetailInput = typeof DeviceDetailInput.Type;
 
+/** A web page on a device that a DevTools frontend can attach to. */
+export const DeviceInspectTarget = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+  url: Schema.String,
+  /** The browser or app that owns the page, such as Chrome or an app's web view. */
+  owner: Schema.String,
+  /** The DevTools frontend page for this browser's version, without its connection parameter. */
+  frontendUrl: Schema.String,
+  /** Opens the page's debugger through the device hub's `/inspect/<token>` relay. */
+  relayToken: Schema.String,
+});
+export type DeviceInspectTarget = typeof DeviceInspectTarget.Type;
+
+export const DeviceInspectTargetsInput = Schema.Struct(DeviceTarget);
+export type DeviceInspectTargetsInput = typeof DeviceInspectTargetsInput.Type;
+
+export const DeviceInspectTargets = Schema.Struct({
+  hostId: DeviceHostId,
+  deviceId: DeviceId,
+  /** Why this device or host cannot list targets, when it cannot. */
+  unsupported: Schema.NullOr(Schema.String),
+  targets: Schema.Array(DeviceInspectTarget),
+});
+export type DeviceInspectTargets = typeof DeviceInspectTargets.Type;
+
 export class DeviceHostUnavailableError extends Schema.TaggedError<DeviceHostUnavailableError>()(
   "DeviceHostUnavailableError",
   {

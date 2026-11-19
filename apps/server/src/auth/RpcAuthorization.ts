@@ -223,6 +223,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.deviceShutdown]: AuthOrchestrationOperateScope,
   [WS_METHODS.deviceDetail]: AuthOrchestrationReadScope,
   [WS_METHODS.deviceAction]: AuthOrchestrationOperateScope,
+  // Opens debug ports into the device's browsers, which can run code in their pages.
+  [WS_METHODS.deviceInspectTargets]: AuthOrchestrationOperateScope,
   [WS_METHODS.subscribeDeviceState]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,

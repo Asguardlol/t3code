@@ -2,6 +2,7 @@ import type { DeviceHostSummary, DevicePlatform } from "@t3tools/contracts";
 import {
   Camera,
   ChevronLeft,
+  Code,
   Home,
   Keyboard,
   Box,
@@ -45,6 +46,8 @@ export function DeviceControlsRail(props: {
   onScreenshot: () => void;
   toolsOpen: boolean;
   onTools: () => void;
+  inspectOpen: boolean;
+  onInspect: () => void;
   onFloat: () => void;
   onClose: () => void;
   onPowerOff: () => void;
@@ -198,6 +201,14 @@ export function DeviceControlsRail(props: {
               onClick={props.onTools}
             >
               <SlidersHorizontal />
+            </RailButton>
+            <RailButton
+              tooltipSide={popupSide}
+              label={gt("Inspect web content")}
+              pressed={props.inspectOpen}
+              onClick={props.onInspect}
+            >
+              <Code />
             </RailButton>
           </>
         ) : null}

@@ -92,6 +92,10 @@ export function createDeviceEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    inspectTargets: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:device:inspect-targets",
+      tag: WS_METHODS.deviceInspectTargets,
+    }),
   };
 }
 

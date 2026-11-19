@@ -20,6 +20,7 @@ import * as NodeSocket from "@effect/platform-node/NodeSocket";
 
 import { authenticateMediaRequest, failEnvironmentInternal } from "../auth/http.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
+import { resolveInspectRelay } from "./DeviceInspect.ts";
 import * as DeviceService from "./DeviceService.ts";
 import { repeatStillFrame } from "./mjpegStillFrame.ts";
 
@@ -46,6 +47,13 @@ const MUTABLE_PATHS: ReadonlyArray<RegExp> = [
   /^\/vendor\/serve-emu\/api\/(screenshot|stream-mode|stream-settings)$/,
   /^\/vendor\/serve-emu\/api\/fold$/,
 ];
+
+// The token, minted by an authenticated target listing, is the credential; see DeviceInspect.
+const INSPECT_RELAY_PATH = /^\/inspect\/([\w-]{32})$/;
+// Browsers stop a public page from opening loopback sockets, so the frontend loads from this origin.
+const INSPECT_FRONTEND_PATH =
+  /^\/inspect-frontend(\/(?:serve_rev|serve_file|serve_internal_file)\/@[0-9a-f]{40}\/[\w./-]+)$/;
+const INSPECT_FRONTEND_ORIGIN = "https://chrome-devtools-frontend.appspot.com";
 
 const ALLOWED_WS_PATHS: ReadonlyArray<RegExp> = [
   /^\/api\/devices\/ws$/,
@@ -186,6 +194,23 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
   });
 });
 
+// Buffered: the client decompresses the upstream body, so its Content-Length no longer applies.
+const serveInspectFrontend = Effect.fn("DeviceHubProxy.serveInspectFrontend")(function* (
+  file: string,
+) {
+  const response = yield* HttpClient.withScope(yield* HttpClient.HttpClient).get(
+    `${INSPECT_FRONTEND_ORIGIN}${file}`,
+  );
+  const body = new Uint8Array(yield* response.arrayBuffer);
+  const contentType = response.headers["content-type"];
+  return HttpServerResponse.uint8Array(body, {
+    status: response.status,
+    // Revision-pinned files never change.
+    headers: { "cache-control": "public, max-age=86400, immutable" },
+    ...(contentType ? { contentType } : {}),
+  });
+});
+
 const handler = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const url = requestUrl(request);
@@ -194,6 +219,17 @@ const handler = Effect.gen(function* () {
   }
   const hubPath = url.value.pathname.slice(DeviceService.DEVICE_HUB_ROUTE_PREFIX.length) || "/";
   const upgrade = isWebSocketUpgrade(request);
+  const inspectToken = hubPath.match(INSPECT_RELAY_PATH)?.[1];
+  if (inspectToken !== undefined) {
+    const debuggerUrl = upgrade ? yield* resolveInspectRelay(inspectToken) : null;
+    if (debuggerUrl === null) return HttpServerResponse.text("Not Found", { status: 404 });
+    // No headers: Chrome refuses a debugger connection that carries a web Origin.
+    return yield* proxyWebSocket(request, debuggerUrl);
+  }
+  const frontendFile = hubPath.match(INSPECT_FRONTEND_PATH)?.[1];
+  if (frontendFile !== undefined && !upgrade && request.method === "GET") {
+    return yield* serveInspectFrontend(frontendFile);
+  }
   const matches = (paths: ReadonlyArray<RegExp>) => paths.some((pattern) => pattern.test(hubPath));
   const allowed = upgrade
     ? matches(ALLOWED_WS_PATHS)

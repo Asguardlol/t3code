@@ -3310,6 +3310,7 @@ export const layerWsRpc = (
         [WS_METHODS.deviceShutdown]: (input) => deviceService.shutdown(input),
         [WS_METHODS.deviceDetail]: (input) => deviceService.detail(input),
         [WS_METHODS.deviceAction]: (input) => deviceService.action(input),
+        [WS_METHODS.deviceInspectTargets]: (input) => deviceService.inspectTargets(input),
         [WS_METHODS.subscribeDeviceState]: (_input) => DeviceService.stateStream(deviceService),
         [WS_METHODS.previewStopLocalServer]: (input) => portDiscovery.stopServer(input),
         [WS_METHODS.subscribeDiscoveredLocalServers]: (input) =>
